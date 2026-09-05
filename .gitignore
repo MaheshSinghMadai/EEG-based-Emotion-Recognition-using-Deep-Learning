@@ -3,3 +3,4 @@
 # Raw dataset — obtain DREAMER separately (EULA-gated), do not commit
 DREAMER.mat
 *.mat
+venv/
