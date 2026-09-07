@@ -7,11 +7,8 @@ Two feature views of the same windows are supported:
     * "raw" : filtered windowed signal, shape [14, window_samples]  (EEGNet, CNN models)
     * "de"  : Differential-Entropy matrix,  shape [14, 5]            (DGCNN, GCN models)
 
-Two validation protocols:
-    * subject-dependent : `build_subject_dependent_loaders(sid, fold)` using
-                          data/splits/subject_dependent_splits.json
-    * LOSO              : `build_loso_loaders(fold)` using
-                          data/splits/loso_splits.json
+Validation protocol (subject-independent):
+    * LOSO : `build_loso_loaders(fold)` using data/splits/loso_splits.json
 
 Normalization statistics are always computed on the TRAIN partition only and applied
 to test (no leakage). A Siamese pair wrapper is provided for Siam-GCAN.
@@ -176,60 +173,6 @@ def _gather_subject(
     sids = [sid] * len(y)
     tids = a.trial_index.tolist()
     return x, y, sids, tids
-
-
-def build_subject_dependent_loaders(
-    processed_dir: str,
-    splits_path: str,
-    sid: str,
-    fold: int = 0,
-    label: str = "valence",
-    feature: str = "raw",
-    batch_size: int = 64,
-    channels: Optional[List[str]] = None,
-    normalize: bool = True,
-    num_workers: int = 0,
-    seed: int = 42,
-) -> Tuple[DataLoader, DataLoader, Dict]:
-    """One subject, one fold -> (train_loader, test_loader, meta)."""
-    with open(splits_path) as f:
-        splits = json.load(f)
-    fold_spec = splits["subjects"][sid]["folds"][fold]
-    tr_idx = np.asarray(fold_spec["train"], dtype=int)
-    te_idx = np.asarray(fold_spec["test"], dtype=int)
-
-    x, y, sids, tids = _gather_subject(processed_dir, sid, feature, label, channels)
-    x_tr, y_tr = x[tr_idx], y[tr_idx]
-    x_te, y_te = x[te_idx], y[te_idx]
-
-    norm = fit_normalizer(x_tr, feature) if normalize else None
-    ds_tr = EEGWindowDataset(x_tr, y_tr, [sids[i] for i in tr_idx], [tids[i] for i in tr_idx], norm)
-    ds_te = EEGWindowDataset(x_te, y_te, [sids[i] for i in te_idx], [tids[i] for i in te_idx], norm)
-
-    g = torch.Generator().manual_seed(seed)
-    tl = DataLoader(ds_tr, batch_size=batch_size, shuffle=True, drop_last=False,
-                    num_workers=num_workers, generator=g)
-    vl = DataLoader(ds_te, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    meta = {
-        "protocol": "subject_dependent", "subject": sid, "fold": fold, "label": label,
-        "feature": feature, "n_train": len(ds_tr), "n_test": len(ds_te),
-        "input_shape": tuple(ds_tr.x.shape[1:]), "class_counts_train": ds_tr.class_counts(),
-    }
-    return tl, vl, meta
-
-
-def iter_subject_dependent(
-    processed_dir: str, splits_path: str, **kwargs
-):
-    """Yield (sid, fold, train_loader, test_loader, meta) over every subject & fold."""
-    with open(splits_path) as f:
-        splits = json.load(f)
-    for sid, spec in splits["subjects"].items():
-        for fold in range(len(spec["folds"])):
-            tl, vl, meta = build_subject_dependent_loaders(
-                processed_dir, splits_path, sid, fold=fold, **kwargs
-            )
-            yield sid, fold, tl, vl, meta
 
 
 def build_loso_loaders(

@@ -21,6 +21,8 @@ import math
 import torch
 import torch.nn as nn
 
+from ._common import make_builder
+
 # Exposed so the notebook / data_loader can request exactly these channels.
 REDUCED_5_CHANNELS = ["AF3", "F3", "F4", "AF4", "O1"]
 
@@ -73,12 +75,9 @@ class CNNTransformerReduced(nn.Module):
         return self.classifier(pooled)
 
 
-def build(cfg: dict) -> CNNTransformerReduced:
-    meta = cfg.get("meta", {})
-    shape = meta.get("input_shape", (5, 512))
-    return CNNTransformerReduced(
-        n_channels=shape[0], n_samples=shape[1],
-        n_classes=cfg.get("n_classes", 2),
-        dim=cfg.get("dim", 64), depth=cfg.get("depth", 3),
-        heads=cfg.get("heads", 4), dropout=cfg.get("dropout", 0.2),
-    )
+build = make_builder(
+    CNNTransformerReduced,
+    default_shape=(5, 512),
+    shape_kwargs=lambda s: {"n_channels": s[0], "n_samples": s[1]},
+    params={"dim": 64, "depth": 3, "heads": 4, "dropout": 0.2},
+)

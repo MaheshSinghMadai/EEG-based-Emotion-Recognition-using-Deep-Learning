@@ -4,23 +4,29 @@ evaluation.py
 Shared evaluation harness. EVERY benchmark notebook must go through this module so
 the numbers in the thesis results table are produced identically.
 
+The benchmark uses a single validation protocol: leave-one-subject-out
+(subject-independent). `benchmark_si.run_one` is the one entry point the notebooks
+call; it drives `run_loso` below.
+
 What it provides
 ----------------
 * `set_seed`, `get_device`, `count_parameters`
-* `default_fit` / `default_predict` : a plain supervised training + inference loop
+* `make_default_fit` / `default_predict` : a plain supervised training + inference loop
 * `compute_metrics` : Accuracy, Precision, Recall, F1 (macro) + confusion matrix
-* `run_subject_dependent(...)` : trains a fresh model per subject/fold, aggregates
-* `run_loso(...)`             : trains a fresh model per LOSO fold, aggregates
-* `save_results(...)`         : writes results/{model_name}_results.json (both protocols
-                                merged into one file) in the fixed schema:
+* `run_loso(...)`    : trains a fresh model per LOSO fold, aggregates
+* `summarize_per_fold(...)` : same aggregation for callers that run their own loop
+* `save_results(...)` : writes results/{model_name}_results.json in the fixed schema:
     {
-      model, protocol, accuracy, precision, recall, f1,
-      per_fold_scores, confusion_matrix, params_count, train_time_sec,
-      accuracy_std, f1_std, config
+      model, family, config,
+      loso: {
+        protocol, accuracy, precision, recall, f1,
+        accuracy_std, f1_std, precision_std, recall_std,
+        per_fold_scores, confusion_matrix, params_count, train_time_sec
+      }
     }
 
-Notebooks that need a custom training step (Siam-GCAN pairs, DADPc domain loss)
-pass their own `fit_fn` / `predict_fn` with the same signatures as the defaults.
+Models that need a custom training step (Siam-GCAN pairs, DADPc domain loss) pass
+their own `fit_fn` / `predict_fn` with the same signatures as the defaults.
 """
 
 from __future__ import annotations
@@ -191,8 +197,8 @@ def summarize_per_fold(per_fold_scores: List[Dict], params_count: int,
                        train_time_sec: float, protocol: str) -> Dict:
     """Build a schema-compliant results dict from a list of per-fold metric dicts.
 
-    Use this in notebooks that run their own custom training loop (e.g. DADPc) instead
-    of `run_subject_dependent` / `run_loso`.
+    Use this in callers that run their own custom training loop (e.g. DADPc) instead
+    of `run_loso`.
     """
     agg = _aggregate(per_fold_scores)
     return {
@@ -219,76 +225,8 @@ def _aggregate(per_unit: List[Dict]) -> Dict:
 
 
 # --------------------------------------------------------------------------------------
-# Protocol runners
+# Protocol runner (leave-one-subject-out / subject-independent)
 # --------------------------------------------------------------------------------------
-def run_subject_dependent(
-    build_model: BuildModelFn,
-    processed_dir: str,
-    splits_path: str,
-    loader_factory: Callable,          # e.g. functools.partial(build_subject_dependent_loaders, ...)
-    fit_fn: FitFn,
-    predict_fn: PredictFn = default_predict,
-    device: Optional[torch.device] = None,
-    model_kwargs: Optional[Dict] = None,
-    n_classes: int = 2,
-    subjects: Optional[Sequence[str]] = None,
-    verbose: bool = True,
-) -> Dict:
-    """
-    Train a FRESH model for every (subject, fold), evaluate on that fold's test split,
-    then report the metric per subject (folds concatenated) and mean ± std over subjects.
-
-    `loader_factory(sid, fold)` must return (train_loader, test_loader, meta).
-    `subjects` optionally restricts the run to a subset (e.g. for a quick smoke test).
-    """
-    device = device or get_device()
-    model_kwargs = model_kwargs or {}
-    with open(splits_path) as f:
-        splits = json.load(f)
-
-    per_subject_preds: Dict[str, Tuple[List, List]] = {}
-    total_train_time = 0.0
-    params_count = None
-
-    for sid, spec in splits["subjects"].items():
-        if subjects is not None and sid not in subjects:
-            continue
-        for fold in range(len(spec["folds"])):
-            tl, vl, meta = loader_factory(sid=sid, fold=fold)
-            model = build_model({**model_kwargs, "meta": meta})
-            if params_count is None:
-                params_count = count_parameters(model)
-            t = fit_fn(model, tl, None, device)
-            total_train_time += t
-            yt, yp = predict_fn(model, vl, device)
-            a, b = per_subject_preds.setdefault(sid, ([], []))
-            a.extend(yt.tolist()); b.extend(yp.tolist())
-            if verbose:
-                m = compute_metrics(yt, yp, n_classes)
-                print(f"  [SD] {sid} fold{fold}: acc={m['accuracy']:.3f} f1={m['f1']:.3f} ({t:.1f}s)")
-
-    per_fold_scores = []
-    per_unit_metrics = []
-    for sid, (yt, yp) in per_subject_preds.items():
-        m = compute_metrics(yt, yp, n_classes)
-        m["subject"] = sid
-        per_fold_scores.append(m)
-        per_unit_metrics.append(m)
-
-    agg = _aggregate(per_unit_metrics)
-    return {
-        "protocol": "subject_dependent",
-        "accuracy": agg["accuracy"], "precision": agg["precision"],
-        "recall": agg["recall"], "f1": agg["f1"],
-        "accuracy_std": agg["accuracy_std"], "f1_std": agg["f1_std"],
-        "precision_std": agg["precision_std"], "recall_std": agg["recall_std"],
-        "confusion_matrix": agg["confusion_matrix"],
-        "per_fold_scores": per_fold_scores,
-        "params_count": int(params_count or 0),
-        "train_time_sec": float(total_train_time),
-    }
-
-
 def run_loso(
     build_model: BuildModelFn,
     loso_path: str,
@@ -348,16 +286,15 @@ def run_loso(
 # --------------------------------------------------------------------------------------
 def save_results(
     model_name: str,
-    subject_dependent: Optional[Dict] = None,
     loso: Optional[Dict] = None,
     family: str = "",
     config: Optional[Dict] = None,
     results_dir: str = RESULTS_DIR_DEFAULT,
 ) -> str:
-    """Merge protocol results into results/{model_name}_results.json.
+    """Write the LOSO results into results/{model_name}_results.json.
 
-    Safe to call once per protocol: an existing file is loaded and only the provided
-    protocol section is overwritten.
+    An existing file is loaded and only the `loso` / `family` / `config` sections
+    are refreshed.
     """
     os.makedirs(results_dir, exist_ok=True)
     path = os.path.join(results_dir, f"{model_name}_results.json")
@@ -371,8 +308,6 @@ def save_results(
         blob["family"] = family
     if config is not None:
         blob["config"] = config
-    if subject_dependent is not None:
-        blob["subject_dependent"] = subject_dependent
     if loso is not None:
         blob["loso"] = loso
 

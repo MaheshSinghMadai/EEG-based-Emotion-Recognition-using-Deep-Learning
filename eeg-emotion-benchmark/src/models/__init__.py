@@ -1,8 +1,8 @@
 """Model zoo for the DREAMER emotion-recognition benchmark.
 
 Each module defines one architecture (plus, where relevant, its custom loss) and a
-`build(cfg)` factory with the signature expected by
-`evaluation.run_subject_dependent` / `run_loso` (`build_model({..., "meta": meta})`).
+`build(cfg)` factory (see `models._common.make_builder`) with the signature expected
+by `evaluation.run_loso` / `benchmark_si.run_one` (`build_model({..., "meta": meta})`).
 """
 
 from . import (  # noqa: F401

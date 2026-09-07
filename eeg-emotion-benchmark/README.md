@@ -2,9 +2,8 @@
 
 Comparative benchmarking pipeline for a Master's thesis: 8 deep-learning
 architectures for EEG-based emotion recognition, each evaluated on the DREAMER
-dataset under **two validation protocols** (subject-dependent and
-leave-one-subject-out), with a consolidated results table and a
-generalization-gap analysis.
+dataset under the **subject-independent (leave-one-subject-out) protocol**, with a
+consolidated results table and an accuracy-vs-efficiency analysis.
 
 ## Layout
 
@@ -13,13 +12,14 @@ eeg-emotion-benchmark/
 ├── data/
 │   ├── raw/DREAMER.mat        # <- put the dataset here
 │   ├── processed/             # per-subject .npz (produced by preprocessing)
-│   └── splits/                # subject_dependent_splits.json, loso_splits.json
+│   └── splits/                # loso_splits.json  (23-fold leave-one-subject-out)
 ├── src/
-│   ├── preprocessing.py       # DREAMER.mat -> windows + DE features + splits
+│   ├── preprocessing.py       # DREAMER.mat -> windows + DE features + LOSO split
 │   ├── data_loader.py         # PyTorch Datasets/DataLoaders (raw & DE views)
-│   ├── evaluation.py          # shared metrics + protocol runners + results IO
-│   └── models/                # one file per architecture
-├── notebooks/                 # 01–08 model notebooks + 09 aggregation
+│   ├── evaluation.py          # shared metrics + LOSO runner + results IO
+│   ├── benchmark_si.py        # REGISTRY + run_one/run_all: the one shared run path
+│   └── models/                # one file per architecture (arch + build(cfg))
+├── notebooks/                 # 01–08 model notebooks + 10 the LOSO driver
 ├── results/                   # {model}_results.json + comparison table + figures
 └── requirements.txt
 ```
@@ -34,12 +34,19 @@ pip install -r requirements.txt
 cp /path/to/DREAMER.mat data/raw/DREAMER.mat
 python -m src.preprocessing --raw data/raw/DREAMER.mat --out data/processed --splits data/splits
 
-# 2. run notebooks 01–08 (each writes results/{model}_results.json)
-#    set QUICK = True in a notebook first for a 3-subject / 3-fold smoke test
-jupyter lab
+# 2a. run every model + comparison table from the shell
+python -m src.benchmark_si --quick                  # 3-fold / 5-epoch smoke test
+python -m src.benchmark_si                          # full 23-fold run, every model
 
-# 3. run notebook 09 to build results/benchmark_comparison.{csv,md} + figures/
+# 2b. …or run one model notebook at a time (01–08). Each is a thin wrapper that
+#     calls `benchmark_si.run_one(MODEL_NAME, ...)` and writes
+#     results/{model}_results.json. Notebook 10 drives the whole zoo + analysis.
+jupyter lab
 ```
+
+Every model's LOSO recipe (feature view, batch size, epochs, lr, any custom
+training loop) lives once in `src/benchmark_si.py::REGISTRY`; `run_one` is the
+single entry point shared by the notebooks and the CLI.
 
 ## The 8 models
 
@@ -54,6 +61,5 @@ jupyter lab
 | 7 | `07_DADPc` | Domain-Adaptive Deep Possibilistic Clustering | Domain adaptation | DE `[14×5]` |
 | 8 | `08_DualAttention_TransformerCNNBiLSTM` | Dual-attention CNN-BiLSTM-Transformer | Hybrid | raw `[14×T]` |
 
-Every model is trained fresh per fold and scored through
-`src/evaluation.py`, so the rows of `results/benchmark_comparison.md` are directly
-comparable.
+Every model is trained fresh per LOSO fold and scored through `src/evaluation.py`,
+so the rows of `results/subject_independent_comparison.md` are directly comparable.

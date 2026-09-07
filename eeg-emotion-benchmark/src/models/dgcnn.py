@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ._common import make_builder
+
 
 class ChebyGraphConv(nn.Module):
     """K-order Chebyshev graph convolution on a *learnable* adjacency.
@@ -106,15 +108,9 @@ class DGCNN(nn.Module):
         return (0.5 * (A + A.t())).cpu()
 
 
-def build(cfg: dict) -> DGCNN:
-    meta = cfg.get("meta", {})
-    shape = meta.get("input_shape", (14, 5))
-    n_nodes, in_dim = shape[0], shape[1]
-    return DGCNN(
-        n_nodes=n_nodes,
-        in_dim=in_dim,
-        hidden=cfg.get("hidden", 64),
-        K=cfg.get("K", 2),
-        n_classes=cfg.get("n_classes", 2),
-        dropout=cfg.get("dropout", 0.3),
-    )
+build = make_builder(
+    DGCNN,
+    default_shape=(14, 5),
+    shape_kwargs=lambda s: {"n_nodes": s[0], "in_dim": s[1]},
+    params={"hidden": 64, "K": 2, "dropout": 0.3},
+)

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from ._common import make_builder
 
 # ASSUMPTION: hand-built Emotiv EPOC topographic grid (rows: frontal -> occipital,
 # cols: left -> right). Empty cells are zero-filled. An 8x9 grid keeps the 10-20
@@ -59,7 +60,6 @@ class CNNBranch(nn.Module):
 
     def forward(self, grid: torch.Tensor) -> torch.Tensor:
         f = self.net(grid)                      # [B, width, H, W]
-        b, d, h, w = f.shape
         return f.flatten(2).transpose(1, 2)     # [B, H*W, width] token sequence
 
 
@@ -103,7 +103,6 @@ class CITEmotionNet(nn.Module):
                  channel_order=None):
         super().__init__()
         self.channel_order = channel_order or _CHANNEL_ORDER
-        h, w = EPOC_GRID_HW
         self.cnn = CNNBranch(in_ch=n_bands, width=dim)
         self.trans = TransformerBranch(n_bands, dim, depth, heads, n_tokens=n_channels, dropout=dropout)
         self.interact = InteractionModule(dim, heads, dropout)
@@ -122,15 +121,9 @@ class CITEmotionNet(nn.Module):
         return self.classifier(fused)
 
 
-def build(cfg: dict) -> CITEmotionNet:
-    meta = cfg.get("meta", {})
-    shape = meta.get("input_shape", (14, 5))
-    return CITEmotionNet(
-        n_channels=shape[0],
-        n_bands=shape[1],
-        dim=cfg.get("dim", 64),
-        heads=cfg.get("heads", 4),
-        depth=cfg.get("depth", 2),
-        n_classes=cfg.get("n_classes", 2),
-        dropout=cfg.get("dropout", 0.2),
-    )
+build = make_builder(
+    CITEmotionNet,
+    default_shape=(14, 5),
+    shape_kwargs=lambda s: {"n_channels": s[0], "n_bands": s[1]},
+    params={"dim": 64, "heads": 4, "depth": 2, "dropout": 0.2},
+)

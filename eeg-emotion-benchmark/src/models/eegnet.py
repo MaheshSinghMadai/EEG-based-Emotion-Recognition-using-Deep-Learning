@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ._common import make_builder
+
 
 class _Constrained2d(nn.Conv2d):
     """Conv2d with a max-norm constraint on the kernel (as in the reference Keras impl).
@@ -98,15 +100,9 @@ class EEGNet(nn.Module):
         return self.classifier(x)
 
 
-def build(cfg: dict) -> EEGNet:
-    meta = cfg.get("meta", {})
-    c, t = meta.get("input_shape", (14, 512))
-    return EEGNet(
-        n_channels=c,
-        n_samples=t,
-        n_classes=cfg.get("n_classes", 2),
-        F1=cfg.get("F1", 8),
-        D=cfg.get("D", 2),
-        kernel_length=cfg.get("kernel_length", 64),
-        dropout=cfg.get("dropout", 0.25),
-    )
+build = make_builder(
+    EEGNet,
+    default_shape=(14, 512),
+    shape_kwargs=lambda s: {"n_channels": s[0], "n_samples": s[1]},
+    params={"F1": 8, "D": 2, "kernel_length": 64, "dropout": 0.25},
+)

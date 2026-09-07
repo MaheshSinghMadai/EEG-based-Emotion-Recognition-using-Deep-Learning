@@ -25,6 +25,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 
+from ._common import make_builder
+
 
 # --------------------------------------------------------------------------------------
 # Classic ML comparators (sklearn)
@@ -68,14 +70,12 @@ class SimpleDECNN(nn.Module):
         return self.classifier(self.features(x))
 
 
-def build(cfg: dict) -> SimpleDECNN:
-    meta = cfg.get("meta", {})
-    shape = meta.get("input_shape", (14, 5))
-    return SimpleDECNN(
-        n_channels=shape[0], n_bands=shape[1],
-        n_classes=cfg.get("n_classes", 2),
-        width=cfg.get("width", 32), dropout=cfg.get("dropout", 0.3),
-    )
+build = make_builder(
+    SimpleDECNN,
+    default_shape=(14, 5),
+    shape_kwargs=lambda s: {"n_channels": s[0], "n_bands": s[1]},
+    params={"width": 32, "dropout": 0.3},
+)
 
 
 # --------------------------------------------------------------------------------------

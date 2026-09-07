@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ._common import make_builder
+
 
 class GraphAttnLayer(nn.Module):
     """GCN propagation on a learnable adjacency + multi-head attention over nodes."""
@@ -93,15 +95,9 @@ def contrastive_loss(emb_a: torch.Tensor, emb_b: torch.Tensor,
     return 0.5 * (pos + neg).mean()
 
 
-def build(cfg: dict) -> SiamGCAN:
-    meta = cfg.get("meta", {})
-    shape = meta.get("input_shape", (14, 5))
-    return SiamGCAN(
-        in_dim=shape[1],
-        n_nodes=shape[0],
-        hidden=cfg.get("hidden", 64),
-        heads=cfg.get("heads", 4),
-        emb_dim=cfg.get("emb_dim", 64),
-        n_classes=cfg.get("n_classes", 2),
-        dropout=cfg.get("dropout", 0.3),
-    )
+build = make_builder(
+    SiamGCAN,
+    default_shape=(14, 5),
+    shape_kwargs=lambda s: {"n_nodes": s[0], "in_dim": s[1]},
+    params={"hidden": 64, "heads": 4, "emb_dim": 64, "dropout": 0.3},
+)

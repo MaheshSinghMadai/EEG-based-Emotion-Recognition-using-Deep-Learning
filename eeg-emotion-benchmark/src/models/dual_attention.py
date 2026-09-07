@@ -20,6 +20,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from ._common import make_builder
+
 
 class ChannelAttention(nn.Module):
     """SE-style gating over EEG channels (attention mechanism #1)."""
@@ -94,15 +96,9 @@ class DualAttentionNet(nn.Module):
         return self.classifier(pooled)
 
 
-def build(cfg: dict) -> DualAttentionNet:
-    meta = cfg.get("meta", {})
-    shape = meta.get("input_shape", (14, 512))
-    return DualAttentionNet(
-        n_channels=shape[0], n_samples=shape[1],
-        n_classes=cfg.get("n_classes", 2),
-        cnn_width=cfg.get("cnn_width", 64),
-        lstm_hidden=cfg.get("lstm_hidden", 64),
-        tr_heads=cfg.get("tr_heads", 4),
-        tr_depth=cfg.get("tr_depth", 1),
-        dropout=cfg.get("dropout", 0.3),
-    )
+build = make_builder(
+    DualAttentionNet,
+    default_shape=(14, 512),
+    shape_kwargs=lambda s: {"n_channels": s[0], "n_samples": s[1]},
+    params={"cnn_width": 64, "lstm_hidden": 64, "tr_heads": 4, "tr_depth": 1, "dropout": 0.3},
+)

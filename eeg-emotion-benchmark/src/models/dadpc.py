@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ._common import make_builder
+
 
 class FeatureExtractor(nn.Module):
     def __init__(self, in_dim: int = 70, hidden: int = 128, emb_dim: int = 64, dropout: float = 0.3):
@@ -76,7 +78,10 @@ class DADPc(nn.Module):
         eta = F.softplus(self.log_eta) + 1e-6
         # classic PCM objective: sum u^m d^2 + sum eta * sum (u log u - u + 1)
         attract = (u.pow(self.m) * d2).sum(dim=1).mean()
-        penalty = (eta * (u * torch.log(u.clamp(min=1e-8)) - u + 1.0).sum(dim=1)).mean()
+        # per-cluster entropy term [B, K], weighted by that cluster's eta_k (broadcast
+        # over dim=1) before summing over clusters and averaging over the batch.
+        ent = u * torch.log(u.clamp(min=1e-8)) - u + 1.0
+        penalty = (eta * ent).sum(dim=1).mean()
         return attract + penalty
 
     @staticmethod
@@ -107,15 +112,9 @@ class DADPc(nn.Module):
         return total, {"ce": ce.item(), "mmd": mmd.item(), "pc": pc.item(), "fe": fe.item()}
 
 
-def build(cfg: dict) -> DADPc:
-    meta = cfg.get("meta", {})
-    shape = meta.get("input_shape", (14, 5))
-    return DADPc(
-        in_shape=shape,
-        n_classes=cfg.get("n_classes", 2),
-        emb_dim=cfg.get("emb_dim", 64),
-        hidden=cfg.get("hidden", 128),
-        n_clusters=cfg.get("n_clusters", None),
-        m=cfg.get("m", 2.0),
-        dropout=cfg.get("dropout", 0.3),
-    )
+build = make_builder(
+    DADPc,
+    default_shape=(14, 5),
+    shape_kwargs=lambda s: {"in_shape": tuple(s)},
+    params={"emb_dim": 64, "hidden": 128, "n_clusters": None, "m": 2.0, "dropout": 0.3},
+)

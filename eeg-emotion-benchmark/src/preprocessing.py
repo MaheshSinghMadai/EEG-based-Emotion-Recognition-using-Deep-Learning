@@ -14,8 +14,8 @@ Pipeline (see the thesis methodology chapter):
                                Raw filtered windows [14 x win_samples] are also saved.
     6. Labeling              : binarize valence / arousal / dominance (2-class).
     7. Save                  : one `data/processed/subject_XX.npz` per subject.
-    8. Splits               : `data/splits/subject_dependent_splits.json`
-                               `data/splits/loso_splits.json`
+    8. Splits               : `data/splits/loso_splits.json` (leave-one-subject-out;
+                               the benchmark's single, subject-independent protocol).
 
 Run:
     python -m src.preprocessing --raw data/raw/DREAMER.mat --out data/processed \
@@ -86,16 +86,6 @@ class PreprocessConfig:
     label_strategy: str = "threshold"
     label_threshold: float = 3.0
     median_scope: str = "subject"     # "subject" or "global" (only for median strategy)
-
-    # Subject-dependent split.
-    # sd_scheme: "holdout" -> single train/test split of size (1 - sd_test_size)
-    #            "kfold"   -> sd_kfolds folds
-    sd_scheme: str = "holdout"
-    sd_test_size: float = 0.2
-    sd_kfolds: int = 5
-    # split_by: "trial"  -> whole film clips go to train OR test (no window leakage)
-    #           "window" -> windows shuffled individually (leaky; provided for ablation)
-    split_by: str = "trial"
 
     seed: int = 42
 
@@ -391,71 +381,6 @@ def process_subject(subj: Dict[str, Any], cfg: PreprocessConfig, global_medians:
 # --------------------------------------------------------------------------------------
 # Splits
 # --------------------------------------------------------------------------------------
-def _kfold_indices(items: np.ndarray, k: int, rng: np.random.Generator) -> List[np.ndarray]:
-    perm = rng.permutation(len(items))
-    return [items[perm[i::k]] for i in range(k)]  # simple round-robin folds
-
-
-def make_subject_dependent_splits(
-    per_subject: Dict[str, Dict[str, np.ndarray]], cfg: PreprocessConfig
-) -> Dict[str, Any]:
-    """Build per-subject train/test index lists.
-
-    Indices refer to rows of that subject's processed arrays. When `split_by == "trial"`
-    entire film clips are assigned to a side (prevents windows of the same clip leaking
-    across the train/test boundary — recommended for an honest subject-dependent number).
-    """
-    rng = np.random.default_rng(cfg.seed)
-    out: Dict[str, Any] = {
-        "protocol": "subject_dependent",
-        "scheme": cfg.sd_scheme,
-        "split_by": cfg.split_by,
-        "default_label": cfg.default_label,
-        "subjects": {},
-    }
-
-    for sid, data in per_subject.items():
-        tidx = data["trial_index"]
-        n = len(tidx)
-        all_rows = np.arange(n)
-
-        if cfg.split_by == "trial":
-            units = np.unique(tidx)
-        else:
-            units = all_rows
-
-        if cfg.sd_scheme == "kfold":
-            fold_units = _kfold_indices(units, cfg.sd_kfolds, rng)
-            folds = []
-            for i in range(cfg.sd_kfolds):
-                test_u = set(fold_units[i].tolist())
-                if cfg.split_by == "trial":
-                    test_rows = all_rows[np.isin(tidx, list(test_u))]
-                    train_rows = all_rows[~np.isin(tidx, list(test_u))]
-                else:
-                    test_rows = np.array(sorted(test_u), dtype=int)
-                    train_rows = np.array([r for r in all_rows if r not in test_u], dtype=int)
-                folds.append(
-                    {"train": train_rows.tolist(), "test": test_rows.tolist()}
-                )
-            out["subjects"][sid] = {"folds": folds}
-        else:  # holdout
-            perm = rng.permutation(len(units))
-            n_test = max(1, int(round(cfg.sd_test_size * len(units))))
-            test_u = set(units[perm[:n_test]].tolist())
-            if cfg.split_by == "trial":
-                test_rows = all_rows[np.isin(tidx, list(test_u))]
-                train_rows = all_rows[~np.isin(tidx, list(test_u))]
-            else:
-                test_rows = np.array(sorted(test_u), dtype=int)
-                train_rows = np.array([r for r in all_rows if r not in test_u], dtype=int)
-            out["subjects"][sid] = {
-                "folds": [{"train": train_rows.tolist(), "test": test_rows.tolist()}]
-            }
-
-    return out
-
-
 def make_loso_splits(subject_ids: List[str], cfg: PreprocessConfig) -> Dict[str, Any]:
     """23-fold leave-one-subject-out. Fold k tests on subject k, trains on the other 22."""
     folds = []
@@ -496,7 +421,6 @@ def run(cfg: PreprocessConfig) -> None:
         global_medians[name] = float(np.median(allscores))
     print(f"[label] global medians: {global_medians}")
 
-    per_subject: Dict[str, Dict[str, np.ndarray]] = {}
     subject_ids: List[str] = []
     for i, subj in enumerate(subjects, start=1):
         sid = f"subject_{i:02d}"
@@ -508,18 +432,9 @@ def run(cfg: PreprocessConfig) -> None:
         arrays["gender"] = np.array(str(subj.get("gender")))
         out_path = os.path.join(cfg.processed_dir, f"{sid}.npz")
         np.savez_compressed(out_path, **arrays)
-        per_subject[sid] = {
-            "trial_index": arrays["trial_index"],
-        }
         print(f" {arrays['raw_windows'].shape[0]} windows -> {out_path}")
 
-    # Splits
-    sd = make_subject_dependent_splits(per_subject, cfg)
-    sd_path = os.path.join(cfg.splits_dir, "subject_dependent_splits.json")
-    with open(sd_path, "w") as f:
-        json.dump(sd, f, indent=2)
-    print(f"[split] {sd_path}")
-
+    # Split (leave-one-subject-out / subject-independent)
     loso = make_loso_splits(subject_ids, cfg)
     loso_path = os.path.join(cfg.splits_dir, "loso_splits.json")
     with open(loso_path, "w") as f:
@@ -545,12 +460,6 @@ def build_argparser() -> argparse.ArgumentParser:
                    default=PreprocessConfig.label_threshold)
     p.add_argument("--median-scope", dest="median_scope",
                    choices=["subject", "global"], default=PreprocessConfig.median_scope)
-    p.add_argument("--sd-scheme", dest="sd_scheme",
-                   choices=["holdout", "kfold"], default=PreprocessConfig.sd_scheme)
-    p.add_argument("--sd-test-size", dest="sd_test_size", type=float, default=PreprocessConfig.sd_test_size)
-    p.add_argument("--sd-kfolds", dest="sd_kfolds", type=int, default=PreprocessConfig.sd_kfolds)
-    p.add_argument("--split-by", dest="split_by",
-                   choices=["trial", "window"], default=PreprocessConfig.split_by)
     p.add_argument("--default-label", dest="default_label",
                    choices=["valence", "arousal", "dominance"], default=PreprocessConfig.default_label)
     p.add_argument("--seed", dest="seed", type=int, default=PreprocessConfig.seed)
