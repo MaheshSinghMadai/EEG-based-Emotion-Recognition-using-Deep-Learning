@@ -14,8 +14,17 @@ Pipeline (see the thesis methodology chapter):
                                Raw filtered windows [14 x win_samples] are also saved.
     6. Labeling              : binarize valence / arousal / dominance (2-class).
     7. Save                  : one `data/processed/subject_XX.npz` per subject.
-    8. Splits               : `data/splits/loso_splits.json` (leave-one-subject-out;
-                               the benchmark's single, subject-independent protocol).
+    8. Splits               : cached split-index JSON in `data/splits/`, one file per
+                               stage of the evaluation protocol (see the plan, S4.8 / S5):
+                               * stage1_sanity_split.json    - 1 held-out subject.
+                               * stage2_screening_splits.json - K-fold subject-grouped CV
+                                                                (default K = 5).
+                               * loso_splits.json             - full 23-fold LOSO. This is
+                                 (== stage3_loso_splits.json)   the name every consumer
+                                                                loads; the stage3_ alias is
+                                                                written byte-identically so
+                                                                the directory matches the
+                                                                documented layout.
 
 Run:
     python -m src.preprocessing --raw data/raw/DREAMER.mat --out data/processed \
@@ -92,6 +101,11 @@ class PreprocessConfig:
     # Which label the *default* comparison uses. All three are always saved; this
     # only annotates the split files so notebooks can pick a consistent target.
     default_label: str = "valence"
+
+    # Staged evaluation protocol (plan S5). The full LOSO split is always written;
+    # these control the two cheaper upstream stages.
+    sanity_subject: str | None = None    # Stage 1 held-out subject id; None => first subject
+    n_screening_folds: int = 5            # Stage 2 subject-grouped K-fold count
 
     def window_samples(self) -> int:
         return int(round(self.window_sec * self.fs))
@@ -400,6 +414,87 @@ def make_loso_splits(subject_ids: List[str], cfg: PreprocessConfig) -> Dict[str,
     }
 
 
+def make_sanity_split(subject_ids: List[str], cfg: PreprocessConfig) -> Dict[str, Any]:
+    """Stage 1 (sanity): a single held-out subject.
+
+    The JSON is shape-identical to `make_loso_splits` output (one entry in `folds`
+    with scalar `test_subject` / list `train_subjects`) so any LOSO-style loader
+    - `data_loader.build_loso_loaders`, `evaluation.run_loso` - can be pointed at
+    this file unchanged and will iterate exactly one fold.
+    """
+    # ASSUMPTION: no per-subject difficulty signal exists at split-build time, so
+    # the sanity subject defaults to the first subject. This matches the implicit
+    # fold-0 selection `benchmark_si._stage_folds(1, 23)` already uses for Stage 1.
+    # Override with cfg.sanity_subject / --sanity-subject.
+    test_sid = cfg.sanity_subject or subject_ids[0]
+    if test_sid not in subject_ids:
+        raise ValueError(
+            f"sanity_subject {test_sid!r} is not one of the processed subjects: {subject_ids}"
+        )
+    return {
+        # Kept as "loso" (not "sanity") so consumers that branch on `protocol`
+        # treat it as a normal 1-fold subject-independent split.
+        "protocol": "loso",
+        "stage": 1,
+        "stage_name": "sanity",
+        "n_folds": 1,
+        "default_label": cfg.default_label,
+        "seed": cfg.seed,
+        "folds": [
+            {
+                "fold": 0,
+                "test_subject": test_sid,
+                "train_subjects": [s for s in subject_ids if s != test_sid],
+            }
+        ],
+    }
+
+
+def make_screening_splits(subject_ids: List[str], cfg: PreprocessConfig) -> Dict[str, Any]:
+    """Stage 2 (screening): K-fold *subject-grouped* cross-validation.
+
+    The subjects are partitioned into K disjoint groups (GroupKFold semantics);
+    fold i tests on group i and trains on the remaining K-1 groups. Every subject
+    is a test subject exactly once, so the whole cohort is covered at K x cost
+    instead of the 23 x of full LOSO.
+
+    Schema note: `test_subjects` is a LIST here, versus the scalar `test_subject`
+    in the LOSO / sanity files - a Stage 2 loader must fan out over the group.
+    """
+    k = int(cfg.n_screening_folds)
+    n = len(subject_ids)
+    if not (2 <= k <= n):
+        raise ValueError(f"n_screening_folds must be in [2, {n}], got {k}")
+
+    # ASSUMPTION: subjects are shuffled (seeded by cfg.seed) before being cut into
+    # K groups, so a fold is not biased by acquisition / id order. np.array_split
+    # makes the first `n % k` groups one larger than the rest (e.g. 23 into 5 ->
+    # sizes 5,5,5,4,4). Change cfg.seed for a different partition.
+    rng = np.random.default_rng(cfg.seed)
+    perm = rng.permutation(n)
+    groups = [sorted(subject_ids[j] for j in idx) for idx in np.array_split(perm, k)]
+
+    folds = []
+    for i, test_group in enumerate(groups):
+        test_set = set(test_group)
+        folds.append(
+            {
+                "fold": i,
+                "test_subjects": test_group,
+                "train_subjects": [s for s in subject_ids if s not in test_set],
+            }
+        )
+    return {
+        "protocol": "subject_grouped_kfold",
+        "stage": 2,
+        "stage_name": "screening",
+        "n_folds": k,
+        "default_label": cfg.default_label,
+        "seed": cfg.seed,
+        "folds": folds,
+    }
+
+
 # --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
@@ -434,12 +529,25 @@ def run(cfg: PreprocessConfig) -> None:
         np.savez_compressed(out_path, **arrays)
         print(f" {arrays['raw_windows'].shape[0]} windows -> {out_path}")
 
-    # Split (leave-one-subject-out / subject-independent)
+    # Splits - one JSON per stage of the evaluation protocol (plan S5).
     loso = make_loso_splits(subject_ids, cfg)
-    loso_path = os.path.join(cfg.splits_dir, "loso_splits.json")
-    with open(loso_path, "w") as f:
-        json.dump(loso, f, indent=2)
-    print(f"[split] {loso_path}")
+    split_files = {
+        # Canonical name every consumer loads (data_loader.py, benchmark_si.py,
+        # the notebooks). Left in place - do not rename.
+        "loso_splits.json": loso,
+        "stage1_sanity_split.json": make_sanity_split(subject_ids, cfg),
+        "stage2_screening_splits.json": make_screening_splits(subject_ids, cfg),
+        # ASSUMPTION: the plan (S3 / S4.8) also names `stage3_loso_splits.json`.
+        # It is byte-identical to `loso_splits.json`; written here as well only so
+        # the splits/ directory matches the documented layout. `loso_splits.json`
+        # stays the name the code actually opens.
+        "stage3_loso_splits.json": loso,
+    }
+    for fname, payload in split_files.items():
+        p = os.path.join(cfg.splits_dir, fname)
+        with open(p, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[split] {p}")
 
     # Persist the exact config used (reproducibility for the thesis appendix).
     with open(os.path.join(cfg.processed_dir, "preprocess_config.json"), "w") as f:
@@ -462,6 +570,12 @@ def build_argparser() -> argparse.ArgumentParser:
                    choices=["subject", "global"], default=PreprocessConfig.median_scope)
     p.add_argument("--default-label", dest="default_label",
                    choices=["valence", "arousal", "dominance"], default=PreprocessConfig.default_label)
+    p.add_argument("--sanity-subject", dest="sanity_subject",
+                   default=PreprocessConfig.sanity_subject,
+                   help="Stage 1 held-out subject id, e.g. subject_05 (default: first subject)")
+    p.add_argument("--screening-folds", dest="n_screening_folds", type=int,
+                   default=PreprocessConfig.n_screening_folds,
+                   help="Stage 2 subject-grouped K-fold count (default: 5)")
     p.add_argument("--seed", dest="seed", type=int, default=PreprocessConfig.seed)
     return p
 

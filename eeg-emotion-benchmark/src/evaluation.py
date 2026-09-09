@@ -76,6 +76,34 @@ def get_device(prefer: str = "auto") -> torch.device:
     return torch.device("cpu")
 
 
+def configure_backends(deterministic: bool = True) -> None:
+    """Enable the cheap, accuracy-neutral speed knobs once per session.
+
+    * TF32 matmul on CUDA (large speedup, negligible effect on these small models).
+    * `cudnn.benchmark` when we are not asking for strict determinism.
+    No effect on MPS / CPU beyond the matmul-precision hint.
+    """
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = not deterministic
+
+
+def amp_enabled(amp: "str | bool", device: torch.device) -> bool:
+    """Resolve the tri-state `amp` flag ("auto" | True | False) for a device.
+
+    "auto" turns mixed precision ON for CUDA only — MPS autocast coverage is still
+    partial and the DE-feature models are too small for it to help there.
+    """
+    if amp == "auto":
+        return device.type == "cuda"
+    return bool(amp)
+
+
 def count_parameters(model: nn.Module, trainable_only: bool = False) -> int:
     return sum(
         p.numel() for p in model.parameters() if (p.requires_grad or not trainable_only)
@@ -85,6 +113,10 @@ def count_parameters(model: nn.Module, trainable_only: bool = False) -> int:
 # --------------------------------------------------------------------------------------
 # Default training / inference
 # --------------------------------------------------------------------------------------
+def _clone_state(model: nn.Module) -> Dict[str, torch.Tensor]:
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
 def make_default_fit(
     epochs: int = 60,
     lr: float = 1e-3,
@@ -93,9 +125,16 @@ def make_default_fit(
     optimizer_name: str = "adam",
     grad_clip: Optional[float] = 5.0,
     early_stop_patience: Optional[int] = 12,
+    min_epochs: int = 0,
+    amp: "str | bool" = "auto",
     verbose: bool = False,
 ) -> FitFn:
-    """Build a `fit_fn`. The model's `forward(x)` must return class logits [B, n_classes]."""
+    """Build a `fit_fn`. The model's `forward(x)` must return class logits [B, n_classes].
+
+    `min_epochs` blocks early stopping before that epoch. `amp` ("auto" | True | False)
+    switches on CUDA mixed precision; on MPS / CPU the loop is byte-for-byte the
+    previous behaviour.
+    """
 
     def fit(model: nn.Module, train_loader: DataLoader,
             val_loader: Optional[DataLoader], device: torch.device) -> float:
@@ -106,8 +145,11 @@ def make_default_fit(
         else:
             opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
+        use_amp = amp_enabled(amp, device)
+        scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
         best_val = float("inf")
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_state = _clone_state(model)
         patience = 0
         t0 = time.time()
         for ep in range(epochs):
@@ -115,13 +157,22 @@ def make_default_fit(
             running = 0.0
             for xb, yb in train_loader:
                 xb, yb = xb.to(device), yb.to(device)
-                opt.zero_grad()
-                logits = model(xb)
-                loss = crit(logits, yb)
-                loss.backward()
-                if grad_clip:
-                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                opt.step()
+                opt.zero_grad(set_to_none=True)
+                if use_amp:
+                    with torch.autocast(device_type="cuda"):
+                        loss = crit(model(xb), yb)
+                    scaler.scale(loss).backward()
+                    if grad_clip:
+                        scaler.unscale_(opt)
+                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    loss = crit(model(xb), yb)
+                    loss.backward()
+                    if grad_clip:
+                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    opt.step()
                 running += loss.item() * xb.size(0)
             train_loss = running / max(1, len(train_loader.dataset))
 
@@ -133,11 +184,11 @@ def make_default_fit(
 
             if monitor < best_val - 1e-4:
                 best_val = monitor
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_state = _clone_state(model)
                 patience = 0
             else:
                 patience += 1
-                if early_stop_patience and patience >= early_stop_patience:
+                if early_stop_patience and ep + 1 >= min_epochs and patience >= early_stop_patience:
                     if verbose:
                         print(f"    early stop @ epoch {ep+1}")
                     break

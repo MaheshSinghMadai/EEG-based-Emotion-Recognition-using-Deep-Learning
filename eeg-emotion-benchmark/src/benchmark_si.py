@@ -66,11 +66,14 @@ from torch.utils.data import DataLoader
 
 from .data_loader import (
     REDUCED_5_CHANNELS,
-    SiamesePairDataset,
     build_loso_loaders,
+    sample_siamese_pairs,
 )
 from .evaluation import (
+    _clone_state,
+    amp_enabled,
     compute_metrics,
+    configure_backends,
     count_parameters,
     default_predict,
     get_device,
@@ -100,6 +103,38 @@ SEED = 42
 QUICK_EPOCHS = 5
 QUICK_DADPC_EPOCHS = 8
 QUICK_FOLDS = 3
+
+
+# --------------------------------------------------------------------------------------
+# Staged evaluation plan
+# --------------------------------------------------------------------------------------
+# Rather than jumping straight to the full 23-fold LOSO for every model, work up in
+# three stages so a bug or a bad recipe is caught in minutes, not after an
+# overnight run:
+#
+#   Stage 1 (sanity)    : 1 held-out subject, short epoch cap. "Does it train, no
+#                         crash, accuracy in a plausible range?"  -> minutes.
+#   Stage 2 (screening) : 5 evenly-spaced LOSO folds, full epochs + early stopping.
+#                         Rough standing between models.           -> < 1 h / model.
+#   Stage 3 (final)     : all 23 folds. The number that goes in the thesis table.
+#                         Only run once Stage 1/2 look right.
+#
+# Every stage uses the SAME per-model recipe (feature view, batch size, lr,
+# published hyper-parameters) from REGISTRY — only fold count and the epoch cap
+# change — so Stage 3 is directly comparable across models.
+STAGE_PLAN: Dict[int, Dict] = {
+    1: {"name": "sanity", "n_folds": 1, "epoch_cap": 15},
+    2: {"name": "screening", "n_folds": 5, "epoch_cap": None},
+    3: {"name": "final", "n_folds": None, "epoch_cap": None},
+}
+
+
+def _stage_folds(stage: int, n_total: int) -> Optional[List[int]]:
+    """Fold indices for a stage: evenly spaced across the 23, or None = all."""
+    n = STAGE_PLAN[stage]["n_folds"]
+    if n is None or n >= n_total:
+        return None
+    return sorted(set(int(round(x)) for x in np.linspace(0, n_total - 1, n)))
 
 
 # --------------------------------------------------------------------------------------
@@ -137,7 +172,7 @@ REGISTRY: Dict[str, SISpec] = {
     ),
     "SiamGCAN": SISpec(
         "SiamGCAN", "Graph CNN + Siamese", siam_gcan.build,
-        feature="de", batch_size=128, epochs=45, lr=1e-3, val_frac=0.0,
+        feature="de", batch_size=128, epochs=45, lr=1e-3, val_frac=0.12,
         runner="siam", extra_config={"pairs_per_sample": 2, "contrastive_lambda": 1.0},
     ),
     "CIT_EmotionNet": SISpec(
@@ -168,38 +203,101 @@ REGISTRY: Dict[str, SISpec] = {
 # Custom training loops (kept identical to notebooks 03 / 07)
 # --------------------------------------------------------------------------------------
 def make_siam_fit(epochs: int, lr: float, lam: float = 1.0,
-                  pairs_per_sample: int = 2, wd: float = 1e-4):
-    """Siamese contrastive + dual cross-entropy loop (Siam-GCAN, notebook 03)."""
+                  pairs_per_sample: int = 2, wd: float = 1e-4,
+                  patience: int = 8, min_epochs: int = 8, amp: "str | bool" = "auto"):
+    """Siamese contrastive + dual cross-entropy loop (Siam-GCAN, notebook 03).
+
+    Fast-path rewrite of the original loop, same objective
+    ``CE(a) + CE(b) + lam * contrastive(emb_a, emb_b)``:
+
+    * DE features are tiny ([14x5]); the whole training tensor is moved to the
+      device once and pairs are gathered on-device — no per-batch host->device
+      copies, no DataLoader worker churn (the previous bottleneck on MPS).
+    * Pairs are resampled every epoch with the vectorised `sample_siamese_pairs`
+      instead of a per-window Python loop.
+    * If a `val_loader` is given, single-branch CE on it drives early stopping
+      (`patience`, not before `min_epochs`); the best state is restored.
+    * `amp` enables CUDA mixed precision (no-op on MPS / CPU).
+    """
 
     def fit(model: nn.Module, train_loader: DataLoader,
             val_loader: Optional[DataLoader], device: torch.device) -> float:
         model.to(device)
         base = train_loader.dataset
-        bs = train_loader.batch_size or 64
-        pair_ds = SiamesePairDataset(base, pairs_per_sample=pairs_per_sample, seed=SEED)
-        pl = DataLoader(pair_ds, batch_size=bs, shuffle=True)
+        bs = train_loader.batch_size or 128
+        X = base.x.to(device)
+        Y = base.y.to(device)
+        y_cpu = base.y.numpy()
+
         opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
         ce = nn.CrossEntropyLoss()
+        rng = np.random.default_rng(SEED)
+        use_amp = amp_enabled(amp, device)
+        scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
+        best_val = float("inf")
+        best_state = _clone_state(model)
+        bad = 0
         t0 = time.time()
-        for _ in range(epochs):
-            pair_ds.resample()
+        for ep in range(epochs):
+            ia, ib, plab = sample_siamese_pairs(y_cpu, pairs_per_sample=pairs_per_sample, rng=rng)
+            ia = torch.from_numpy(ia).to(device)
+            ib = torch.from_numpy(ib).to(device)
+            plab = torch.from_numpy(plab).to(device)
+            perm = torch.randperm(ia.numel(), device=device)
+
             model.train()
-            for xa, xb, plab, ya, yb in pl:
-                xa, xb = xa.to(device), xb.to(device)
-                plab, ya, yb = plab.to(device), ya.to(device), yb.to(device)
-                opt.zero_grad()
-                ea, eb, la, lb = model.forward_pair(xa, xb)
-                loss = ce(la, ya) + ce(lb, yb) + lam * siam_gcan.contrastive_loss(ea, eb, plab)
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-                opt.step()
+            for s in range(0, perm.numel(), bs):
+                sl = perm[s:s + bs]
+                a, b = ia[sl], ib[sl]
+                opt.zero_grad(set_to_none=True)
+                if use_amp:
+                    with torch.autocast(device_type="cuda"):
+                        ea, eb, la, lb = model.forward_pair(X[a], X[b])
+                        loss = (ce(la, Y[a]) + ce(lb, Y[b])
+                                + lam * siam_gcan.contrastive_loss(ea, eb, plab[sl]))
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    ea, eb, la, lb = model.forward_pair(X[a], X[b])
+                    loss = (ce(la, Y[a]) + ce(lb, Y[b])
+                            + lam * siam_gcan.contrastive_loss(ea, eb, plab[sl]))
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                    opt.step()
+
+            if val_loader is None:
+                continue
+            model.eval()
+            tot, cnt = 0.0, 0
+            with torch.no_grad():
+                for xb, yb in val_loader:
+                    xb, yb = xb.to(device), yb.to(device)
+                    tot += ce(model(xb), yb).item() * xb.size(0)
+                    cnt += xb.size(0)
+            monitor = tot / max(1, cnt)
+            if monitor < best_val - 1e-4:
+                best_val = monitor
+                best_state = _clone_state(model)
+                bad = 0
+            else:
+                bad += 1
+                if ep + 1 >= min_epochs and bad >= patience:
+                    break
+
+        if val_loader is not None:
+            model.load_state_dict(best_state)
         return time.time() - t0
 
     return fit
 
 
 def run_dadpc_loso(spec: SISpec, label: str, quick: bool,
-                   folds: Optional[Sequence[int]], device: torch.device) -> Dict:
+                   folds: Optional[Sequence[int]], device: torch.device,
+                   epochs_override: Optional[int] = None) -> Dict:
     """Bespoke LOSO loop for DADPc (notebook 07): the held-out subject's *unlabelled*
     windows are used as the target domain during training (MMD + possibilistic +
     fuzzy-entropy terms), then the same windows are classified for scoring."""
@@ -209,7 +307,7 @@ def run_dadpc_loso(spec: SISpec, label: str, quick: bool,
     w_mmd = spec.extra_config["w_mmd"]
     w_pc = spec.extra_config["w_pc"]
     w_fe = spec.extra_config["w_fe"]
-    epochs = QUICK_DADPC_EPOCHS if quick else spec.epochs
+    epochs = epochs_override or (QUICK_DADPC_EPOCHS if quick else spec.epochs)
 
     per_fold: List[Dict] = []
     t_total = 0.0
@@ -289,38 +387,60 @@ def _loso_loader_factory(spec: SISpec, label: str) -> Callable:
         processed_dir=PROCESSED_DIR, loso_path=LOSO_SPLITS,
         label=label, feature=spec.feature, batch_size=spec.batch_size,
         channels=spec.channels, normalize=True, val_frac=spec.val_frac,
+        pin_memory=torch.cuda.is_available(),
     )
 
 
 def run_one(name: str, label: str = "valence", quick: bool = False,
             folds: Optional[Sequence[int]] = None, device: Optional[torch.device] = None,
-            save: bool = True) -> Dict:
-    """Run one registered model through the 23-fold LOSO protocol and (optionally)
-    write `results/{name}_results.json`. Returns the `loso` results dict."""
+            save: bool = True, stage: Optional[int] = None,
+            epochs: Optional[int] = None) -> Dict:
+    """Run one registered model through the LOSO protocol and (optionally) write
+    `results/{name}_results.json`. Returns the `loso` results dict.
+
+    `stage` (1 / 2 / 3) selects the staged plan in `STAGE_PLAN` — how many folds and
+    the epoch cap — while keeping the model's published recipe. `stage` overrides
+    `quick`; `folds` still wins if given explicitly. `epochs` forces the epoch
+    budget (before any stage cap).
+    """
     from .evaluation import run_loso  # local import keeps module import cheap
 
     spec = REGISTRY[name]
+    configure_backends()
     device = device or get_device()
     set_seed(SEED)
-    epochs = QUICK_EPOCHS if quick else spec.epochs
-    fold_sel = list(range(QUICK_FOLDS)) if (quick and folds is None) else folds
 
-    print(f"\n=== {name}  [{spec.family}]  feature={spec.feature} "
-          f"batch={spec.batch_size} epochs={epochs} lr={spec.lr} "
+    n_epochs = epochs or spec.epochs
+    if stage is not None:
+        plan = STAGE_PLAN[stage]
+        with open(LOSO_SPLITS) as f:
+            n_total = json.load(f)["n_folds"]
+        fold_sel = list(folds) if folds is not None else _stage_folds(stage, n_total)
+        if plan["epoch_cap"]:
+            n_epochs = min(n_epochs, plan["epoch_cap"])
+        run_tag = f"stage{stage}({plan['name']})"
+    else:
+        n_epochs = epochs or (QUICK_EPOCHS if quick else spec.epochs)
+        fold_sel = list(range(QUICK_FOLDS)) if (quick and folds is None) else folds
+        run_tag = "quick" if quick else "full"
+
+    print(f"\n=== {name}  [{spec.family}]  {run_tag}  feature={spec.feature} "
+          f"batch={spec.batch_size} epochs={n_epochs} lr={spec.lr} "
           f"folds={'all' if fold_sel is None else list(fold_sel)} ===")
     t0 = time.time()
 
     if spec.runner == "dadpc":
-        loso_res = run_dadpc_loso(spec, label, quick, fold_sel, device)
+        loso_res = run_dadpc_loso(spec, label, quick, fold_sel, device,
+                                  epochs_override=n_epochs if stage is not None else None)
     else:
         if spec.runner == "siam":
             fit_fn = make_siam_fit(
-                epochs=epochs, lr=spec.lr,
+                epochs=n_epochs, lr=spec.lr,
                 lam=spec.extra_config.get("contrastive_lambda", 1.0),
                 pairs_per_sample=spec.extra_config.get("pairs_per_sample", 2),
             )
         else:
-            fit_fn = make_default_fit(epochs=epochs, lr=spec.lr)
+            fit_fn = make_default_fit(epochs=n_epochs, lr=spec.lr)
         loso_res = run_loso(
             build_model=spec.build, loso_path=LOSO_SPLITS,
             loader_factory=_loso_loader_factory(spec, label),
@@ -334,8 +454,9 @@ def run_one(name: str, label: str = "valence", quick: bool = False,
     if save:
         config = {
             "label": label, "feature": spec.feature, "channels": spec.channels,
-            "batch_loso": spec.batch_size, "epochs_loso": epochs, "lr": spec.lr,
+            "batch_loso": spec.batch_size, "epochs_loso": n_epochs, "lr": spec.lr,
             "val_frac": spec.val_frac, "runner": spec.runner, "quick": quick,
+            "stage": stage, "run_tag": run_tag,
             **spec.extra_config,
         }
         save_results(name, loso=loso_res, family=spec.family,
@@ -363,11 +484,12 @@ def _already_done(name: str, label: str, quick: bool) -> bool:
 def run_all(models: Optional[Sequence[str]] = None, label: str = "valence",
             quick: bool = False, folds: Optional[Sequence[int]] = None,
             skip_existing: bool = True, device: Optional[torch.device] = None,
-            with_baseline: bool = True) -> Dict[str, Dict]:
+            with_baseline: bool = True, stage: Optional[int] = None) -> Dict[str, Dict]:
     """Run every requested model through the subject-independent protocol.
 
     `models` : names from `REGISTRY` (default: all, in registry order).
     `skip_existing` : skip a model whose results file already matches (label, quick).
+    `stage` : 1 / 2 / 3 staged plan (see `STAGE_PLAN`); overrides `quick`.
     Returns {name: loso_results_dict} for the models run this call.
     """
     names = list(models) if models else list(REGISTRY)
@@ -376,18 +498,25 @@ def run_all(models: Optional[Sequence[str]] = None, label: str = "valence",
         raise KeyError(f"unknown model(s): {unknown}. known: {list(REGISTRY)}")
 
     device = device or get_device()
-    print(f"device: {device} | label: {label} | quick: {quick} | models: {names}")
+    print(f"device: {device} | label: {label} | "
+          f"{'stage=' + str(stage) if stage is not None else 'quick=' + str(quick)} | "
+          f"models: {names}")
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out: Dict[str, Dict] = {}
 
+    if stage is not None and folds is None:
+        with open(LOSO_SPLITS) as f:
+            baseline_folds = _stage_folds(stage, json.load(f)["n_folds"])
+    else:
+        baseline_folds = list(range(QUICK_FOLDS)) if (quick and folds is None) else folds
+
     if with_baseline and not (skip_existing and _already_done("MajorityBaseline", label, quick)):
         print("\n=== MajorityBaseline [reference] ===")
-        fold_sel = list(range(QUICK_FOLDS)) if (quick and folds is None) else folds
-        base = run_majority_baseline(label, fold_sel)
+        base = run_majority_baseline(label, baseline_folds)
         quick_report("MajorityBaseline", base)
         save_results("MajorityBaseline", loso=base, family="baseline",
                      config={"label": label, "feature": "-", "quick": quick,
-                             "runner": "zeror"},
+                             "stage": stage, "runner": "zeror"},
                      results_dir=RESULTS_DIR)
         out["MajorityBaseline"] = base
 
@@ -396,7 +525,8 @@ def run_all(models: Optional[Sequence[str]] = None, label: str = "valence",
             print(f"\n[skip] {name} — results/{name}_results.json already matches "
                   f"(label={label}, quick={quick}). Use --no-skip-existing to recompute.")
             continue
-        out[name] = run_one(name, label=label, quick=quick, folds=folds, device=device)
+        out[name] = run_one(name, label=label, quick=quick, folds=folds,
+                            device=device, stage=stage)
 
     build_comparison(RESULTS_DIR, label=label)
     try:
@@ -584,8 +714,11 @@ def build_argparser() -> argparse.ArgumentParser:
                    choices=["valence", "arousal", "dominance"])
     p.add_argument("--quick", action="store_true",
                    help=f"{QUICK_FOLDS}-fold / {QUICK_EPOCHS}-epoch smoke test")
+    p.add_argument("--stage", type=int, default=None, choices=[1, 2, 3],
+                   help="staged plan: 1=sanity (1 fold), 2=screening (5 folds), "
+                        "3=final (23-fold); overrides --quick")
     p.add_argument("--folds", nargs="+", type=int, default=None,
-                   help="explicit fold indices (0-22); overrides --quick fold count")
+                   help="explicit fold indices (0-22); overrides --quick / --stage fold count")
     p.add_argument("--no-skip-existing", dest="skip_existing", action="store_false",
                    help="recompute even if a matching results file exists")
     p.add_argument("--no-baseline", dest="with_baseline", action="store_false")
@@ -605,6 +738,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     run_all(
         models=args.models, label=args.label, quick=args.quick, folds=args.folds,
         skip_existing=args.skip_existing, device=device, with_baseline=args.with_baseline,
+        stage=args.stage,
     )
 
 
