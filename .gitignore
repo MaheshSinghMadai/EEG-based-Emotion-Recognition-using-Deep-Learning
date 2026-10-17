@@ -4,3 +4,4 @@
 DREAMER.mat
 *.mat
 venv/
+*.dat

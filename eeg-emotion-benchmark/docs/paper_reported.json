@@ -1,0 +1,31 @@
+{
+  "_note": "Headline numbers as reported in each paper. Fill a value ONLY after reading it in the paper; record dataset, task and split so the leakage level of the original protocol is explicit. Used by src/analysis.py (table T3).",
+  "models": {
+    "DADPc": {
+      "accuracy": 87.83, "std": 4.21,
+      "dataset": "SEED, 3-class", "protocol": "cross-subject cross-session LOSO, transductive DA",
+      "split_leakage": "subject-disjoint (unlabeled target inputs used)",
+      "source": "Dan et al. 2025, Sec. 6.3.1, Table 1"
+    },
+    "CIT-EmotionNet": {
+      "accuracy": 98.57, "std": 1.38,
+      "dataset": "SEED, 3-class", "protocol": "random 6:4 split of 4 s windows",
+      "split_leakage": "window-level (trial + subject leakage)",
+      "source": "Lu et al. 2023, Sec. 3.1 and Table 1"
+    },
+    "DAH-Net": {
+      "accuracy": 99.19, "std": null,
+      "dataset": "Kaggle EEG feature set (988-d), 3-class", "protocol": "stratified random 80/20 split",
+      "split_leakage": "sample-level (subject structure unknown)",
+      "source": "arXiv:2602.06411, Abstract and Sec. III-E"
+    },
+    "STGATE": {
+      "accuracy": null, "std": null, "dataset": null, "protocol": null, "split_leakage": null,
+      "source": "TODO: Li et al. 2023, Front. Hum. Neurosci. 17:1169949 (add PDF to Papers/)"
+    },
+    "CLISA": {
+      "accuracy": null, "std": null, "dataset": null, "protocol": null, "split_leakage": null,
+      "source": "TODO: Shen et al. 2022, IEEE TAFFC (add PDF to Papers/)"
+    }
+  }
+}
