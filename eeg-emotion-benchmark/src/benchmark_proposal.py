@@ -90,9 +90,9 @@ MODELS: Dict[str, ProposalModel] = {
     ),
     "STGATE": ProposalModel(
         "STGATE", 2023, "Dynamic graph attention + Transformer", stgate.build, "de_seq",
-        TrainRecipe(lr=1e-3, weight_decay=1e-4, batch_size=64,
-                    source="TO VERIFY against the STGATE paper (PDF not in Papers/)"),
-        paper_protocol="subject-dependent and subject-independent (SEED, SEED-IV, DREAMER) - verify",
+        TrainRecipe(lr=1e-5, weight_decay=0.0, batch_size=16,
+                    source="Sec. 4.2: Adam, lr 1e-5, batch 16, dropout 0.3"),
+        paper_protocol="LOSO on SEED, SEED-IV, DREAMER; held-out subject doubles as validation set",
     ),
     "DAH-Net": ProposalModel(
         "DAH-Net", 2026, "1D-CNN + BiLSTM + dual attention", dah_net.build, "handcrafted",
@@ -103,10 +103,13 @@ MODELS: Dict[str, ProposalModel] = {
     ),
     "CLISA": ProposalModel(
         "CLISA", 2022, "Contrastive self-supervised pretraining", clisa.build, "raw",
-        TrainRecipe(lr=1e-3, weight_decay=1e-4, batch_size=64,
-                    source="TO VERIFY against the CLISA paper (PDF not in Papers/)"),
-        fit=clisa.fit_clisa, fit_kwargs={"pretrain_epochs": 30},
-        paper_protocol="cross-subject (subject-grouped CV) on THU-EP and SEED - verify",
+        TrainRecipe(lr=5e-4, weight_decay=0.025, batch_size=256,
+                    source="Sec. 4.4: MLP Adam lr 5e-4, batch 256; contrastive stage Adam lr 7e-4, "
+                           "wd 0.015, cosine warm restarts, 100 epochs, patience 30 (fit_kwargs)"),
+        fit=clisa.fit_clisa,
+        fit_kwargs={"pretrain_epochs": 100, "pretrain_patience": 30, "pretrain_lr": 7e-4,
+                    "pretrain_weight_decay": 0.015, "warm_restarts": 3},
+        paper_protocol="LOSO on SEED, 10-fold subject CV on THU-EP; test-adaptive feature normalization",
     ),
 }
 

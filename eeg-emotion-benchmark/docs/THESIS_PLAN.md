@@ -33,7 +33,8 @@ split interfaces (see §8).
 | 5 | DADPc trained with plain cross-entropy (no reconstruction, no clustering, no target data). | High — not DADPc | Re-implemented from the paper (AE + adaptive loss + possibilistic clustering + memory-bank centroids) |
 | 6 | CLISA used generic noise-augmentation pairs, not stimulus-aligned inter-subject pairs. | High — not CLISA | Stimulus-aligned positives from two different training subjects; frozen-encoder DE features + MLP |
 | 7 | CIT-EmotionNet used an 8×9 map and a single cross-attention fusion. | Medium | 32×32 map, ResNet + ViT branches, L2G/G2L CIT modules after stages 1–3 |
-| 8 | STGATE / DAH-Net were "inspired-by" baselines. | Medium | Rebuilt to the published structure (STGATE: verify against full PDF) |
+| 8 | STGATE / DAH-Net were "inspired-by" baselines. | Medium | Rebuilt to the published structure; STGATE re-checked against the full PDF (multi-kernel conv TLB, input-dependent spatial attention with top-10 edges, ASTGCN temporal attention, paper recipe) |
+| 12 | Fidelity pass against the full PDFs: CLISA base encoder used a depthwise temporal conv (16 maps instead of 16×16), random stimulus keys (several windows of one trial as negatives), no stratified normalization, non-paper recipe; CIT-EmotionNet Stage 0 kept full resolution instead of Conv7×7/s2 + MaxPool (Eq. 1); DAH-Net used GELU instead of ReLU | High (CLISA), Medium (CIT) | All fixed; existing CLISA, STGATE and CIT-EmotionNet results predate the fixes and must be re-run |
 | 9 | Only 12 of 32 DEAP subjects are in `data/raw/DEAP`. | High for final results | **Action for you:** download the remaining 20 `sXX.dat` files |
 | 10 | No majority-class floor; DEAP and DREAMER have different label priors (≈52% vs ≈41% high valence), so cross-dataset accuracy alone is misleading. | Medium | Majority baseline in every table; macro-F1 reported alongside accuracy |
 | 11 | Paper protocols are themselves leaky: CIT-EmotionNet 98.57% uses a random 6:4 window split; DAH-Net 99.19% a random 80/20 split on a non-DEAP/DREAMER feature set. | Finding | Becomes a core result of Table T3 |
@@ -95,10 +96,10 @@ Leakage inflation is decomposed as
 | Model (year) | Paradigm | Input | Reproduced | Main documented deviations | Paper protocol |
 |---|---|---|---|---|---|
 | DADPc (2025) | Domain adaptation | DE [14×4] | AE, adaptive σ-loss, sharpened CE, possibilistic clustering with fuzzy entropy, memory-bank centroids, unlabeled target | per-epoch (not per-batch) bank refresh; λ3 fixed; 4 s windows, binary labels | LOSO, transductive — SEED 87.83% |
-| CIT-EmotionNet (2023/24) | CNN–Transformer fusion | DE → 32×32×4 map | ResNet stages, ViT (1 token/band), L2G/G2L after stages 1–3, Adam 1e-5, batch 32 | DE instead of PSD (affine-equivalent after z-scoring); 14 channels interpolated | random 6:4 windows — SEED 98.57% |
-| STGATE (2023) | Graph attention + Transformer | DE seq [14×4×4] | Transformer learning block, multi-head GAT with learnable top-k adjacency, temporal attention | **to verify with full paper** (layers, heads, sparsification) | verify |
+| CIT-EmotionNet (2023/24) | CNN–Transformer fusion | DE → 32×32×4 map | ResNet stages with Stage 0 Conv7×7/s2 + MaxPool, ViT (1 token/band, 3 blocks/stage), L2G/G2L after stages 1–3, Adam 1e-5, batch 32 | DE instead of PSD (affine-equivalent after z-scoring); 14 channels interpolated | random 6:4 windows — SEED 98.57% |
+| STGATE (2023) | Graph attention + Transformer | DE seq [14×4×4] | TLB (1/3/3×3 multi-kernel conv + Transformer), input-dependent spatial attention (Eq. 9–11, BN, top-10, kNN-initialised), temporal attention, multi-head GAT, Adam 1e-5, batch 16, dropout 0.3 | temporal attention in ASTGCN form (printed Eq. 12 is dimensionally N×N); A enters GAT logits as a masked bias so it is trainable; unreported widths/heads chosen by us | LOSO, held-out subject also used as validation — DREAMER valence 77.44% |
 | DAH-Net (2026) | CNN–BiLSTM–dual attention | 273-d engineered | 4 conv + residual, 2×BiLSTM(256), 16+8-head attention, max+avg pool, AdamW recipe, augmentation | 273-d recomputed features instead of the 988-d Kaggle set; shared epoch cap | random 80/20 — 99.19% |
-| CLISA (2022) | Contrastive self-supervision | filtered signal [14×512] | stimulus-aligned inter-subject NT-Xent pretraining, frozen-encoder DE features, MLP | kernels scaled to 128 Hz; no LDS smoothing | **to verify** |
+| CLISA (2022) | Contrastive self-supervision | filtered signal [14×512] | per-trial stimulus-aligned sampler over all subject pairs, 16 spatial × 16 temporal base encoder, pooled depthwise projector, stratified normalization, NT-Xent, Adam 7e-4 + cosine warm restarts; 256-d trained-DE + MLP (2×30), Adam 5e-4, batch 256 | kernels scaled to 128 Hz (P1=31, S=15, P2=3); 4 s samples; in-window DE averaging instead of LDS; train-set (not test-adaptive) feature normalization; τ=0.07 (not reported) | LOSO with test-adaptive normalization — SEED 86.4% |
 
 DADPc uses unlabeled target-domain inputs. This is not label leakage (asserted: the loader
 yields inputs only), but it is a different information regime, so DADPc is additionally
@@ -110,8 +111,8 @@ Weeks are relative; align W-numbers with your submission deadline and supervisor
 
 | Phase | Weeks | Tasks | Done when |
 |---|---|---|---|
-| 0. Data completion | W1 | Download remaining 20 DEAP subjects; re-run `python -m src.preprocessing --dataset DEAP`; add STGATE and CLISA PDFs to `Papers/`; fill `docs/paper_reported.json` | 32 DEAP files, manifests regenerated, tests green |
-| 1. Fidelity check | W1–W2 | Compare STGATE and CLISA modules against the PDFs and fix; sanity-check every model under `random_window` (should reach clearly-above-chance accuracy — a model that cannot even fit leaky splits has a bug) | All five beat the majority baseline on `random_window` |
+| 0. Data completion | W1 | Download remaining 20 DEAP subjects; re-run `python -m src.preprocessing --dataset DEAP` (PDFs and `docs/paper_reported.json`: done) | 32 DEAP files, manifests regenerated, tests green |
+| 1. Fidelity check | W1–W2 | ~~Compare STGATE and CLISA modules against the PDFs and fix~~ (done, audit #12); sanity-check every model under `random_window` (should reach clearly-above-chance accuracy — a model that cannot even fit leaky splits has a bug) | All five beat the majority baseline on `random_window` |
 | 2. Strict within-dataset | W2–W4 | `--protocol loso` on DEAP and DREAMER, seeds 42 43 44, valence then arousal | T1, T4 complete |
 | 3. Leakage ablation | W4–W5 | `--protocol leakage_suite` on both datasets, 3 seeds | T2, leakage figure |
 | 4. Cross-dataset | W5–W6 | `--protocol transfer` both directions, 3 seeds; DADPc transductive + inductive | T5 |
@@ -180,7 +181,7 @@ Appendix — manifest SHA-256 table, full configs, per-subject results.
 |---|---|
 | Strict accuracies near chance make rankings unstable | 3 seeds, per-subject tests, majority floor, report macro-F1 and ties honestly — a null ranking difference is itself a finding |
 | CIT-EmotionNet lr 1e-5 under-trains within 100 epochs | Report the paper recipe as primary; add a single sensitivity run (lr 1e-4) clearly labelled |
-| STGATE/CLISA details differ from papers | Phase 1 fidelity check against PDFs before any final run |
+| Unreported architecture details (widths, heads, τ) | Chosen once, documented in each module docstring, never tuned on test subjects |
 | DADPc transductive regime questioned | Report both transductive and inductive variants |
 | Compute | GPU for CIT-EmotionNet; the other four run locally |
 | Incomplete DEAP (12/32) | Phase 0; if impossible, state the cohort explicitly in every table |

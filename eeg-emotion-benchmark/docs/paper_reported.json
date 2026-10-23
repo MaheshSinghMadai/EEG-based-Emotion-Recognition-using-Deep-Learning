@@ -20,12 +20,16 @@
       "source": "arXiv:2602.06411, Abstract and Sec. III-E"
     },
     "STGATE": {
-      "accuracy": null, "std": null, "dataset": null, "protocol": null, "split_leakage": null,
-      "source": "TODO: Li et al. 2023, Front. Hum. Neurosci. 17:1169949 (add PDF to Papers/)"
+      "accuracy": 77.44, "std": 8.40,
+      "dataset": "DREAMER, binary valence", "protocol": "LOSO (also SEED 90.37%, SEED-IV 76.43%, DREAMER arousal 75.26%)",
+      "split_leakage": "subject-disjoint, but the held-out subject is also the validation set (checkpoint/hyper-parameter selection on test)",
+      "source": "Li et al. 2023, Front. Hum. Neurosci. 17:1169949, Sec. 4.2 and Table 2"
     },
     "CLISA": {
-      "accuracy": null, "std": null, "dataset": null, "protocol": null, "split_leakage": null,
-      "source": "TODO: Shen et al. 2022, IEEE TAFFC (add PDF to Papers/)"
+      "accuracy": 86.4, "std": 6.4,
+      "dataset": "SEED, 3-class", "protocol": "LOSO (also THU-EP binary 71.9%, 10-fold cross-subject)",
+      "split_leakage": "subject-disjoint; DE features normalized online with unlabeled test-subject data",
+      "source": "Shen et al. 2022, IEEE TAFFC, Sec. 4.4-4.5 and Table 5"
     }
   }
 }

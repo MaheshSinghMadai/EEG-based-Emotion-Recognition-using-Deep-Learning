@@ -3,7 +3,7 @@ DAH-Net — Dual-Attention Hybrid Network (arXiv:2602.06411, 2026 preprint).
 
 Reproduced from the paper (Section III, Table I, Table II):
     * Input: an engineered EEG feature vector treated as a 1-D sequence.
-    * 1D-CNN encoder: 4 convolutional layers + 1 residual block.
+    * 1D-CNN encoder: 4 convolutional layers + 1 residual block, ReLU (Sec. III-C).
     * BiLSTM: 2 bidirectional layers, 256 units per direction.
     * Dual multi-head self-attention: 16 heads, then 8 heads (residual + LayerNorm).
     * Global max + average pooling, dropout 0.28, softmax classifier.
@@ -16,7 +16,9 @@ Documented deviations:
       Here the four feature categories it names (statistical, frequency-domain,
       covariance/connectivity, eigenvalue) are recomputed per 4 s window from the 14
       shared channels -> 273-d vector (see `preprocessing.handcrafted_features`).
-    * Max 400 epochs / patience 75 are replaced by the benchmark-wide epoch cap and
+    * Conv channel widths, kernel sizes and pooling are not reported; the values in
+      `build` are ours.
+    * Max 400 epochs / patience 75 (best validation accuracy) are replaced by the benchmark-wide epoch cap and
       patience so all models get the same stopping rule.
     * The paper's evaluation is a random 80/20 split; its 99.19% is therefore a
       window-level (leaky) estimate, not a subject-independent one.
@@ -34,10 +36,10 @@ class ResidualBlock1d(nn.Module):
     def __init__(self, channels: int, kernel: int = 3):
         super().__init__()
         self.body = nn.Sequential(
-            nn.Conv1d(channels, channels, kernel, padding=kernel // 2), nn.BatchNorm1d(channels), nn.GELU(),
+            nn.Conv1d(channels, channels, kernel, padding=kernel // 2), nn.BatchNorm1d(channels), nn.ReLU(),
             nn.Conv1d(channels, channels, kernel, padding=kernel // 2), nn.BatchNorm1d(channels),
         )
-        self.act = nn.GELU()
+        self.act = nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(x + self.body(x))
@@ -60,10 +62,10 @@ class DAHNet(nn.Module):
         super().__init__()
         c1, c2, c3, c4 = cnn_channels
         self.cnn = nn.Sequential(
-            nn.Conv1d(1, c1, 5, padding=2), nn.BatchNorm1d(c1), nn.GELU(),
-            nn.Conv1d(c1, c2, 3, padding=1), nn.BatchNorm1d(c2), nn.GELU(), nn.MaxPool1d(2),
-            nn.Conv1d(c2, c3, 3, padding=1), nn.BatchNorm1d(c3), nn.GELU(), nn.MaxPool1d(2),
-            nn.Conv1d(c3, c4, 3, padding=1), nn.BatchNorm1d(c4), nn.GELU(), nn.MaxPool1d(2),
+            nn.Conv1d(1, c1, 5, padding=2), nn.BatchNorm1d(c1), nn.ReLU(),
+            nn.Conv1d(c1, c2, 3, padding=1), nn.BatchNorm1d(c2), nn.ReLU(), nn.MaxPool1d(2),
+            nn.Conv1d(c2, c3, 3, padding=1), nn.BatchNorm1d(c3), nn.ReLU(), nn.MaxPool1d(2),
+            nn.Conv1d(c3, c4, 3, padding=1), nn.BatchNorm1d(c4), nn.ReLU(), nn.MaxPool1d(2),
             ResidualBlock1d(c4),
             nn.Dropout(dropout),
         )

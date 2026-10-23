@@ -5,8 +5,9 @@ PeerJ Comput. Sci. 2024, doi:10.7717/peerj-cs.2610).
 Reproduced from the paper (Sections 2.2-2.5, 3.1):
     * Input: spatial-spectral map SM in R^{32 x 32 x B}: per-band electrode values are
       placed on a 2-D scalp grid (B = number of frequency bands).
-    * CNN branch: ResNet; Stage 0 (7x7 conv + BN + ReLU, resolution preserved) and
-      Stages 1-4 with two BasicBlocks each (64, 128, 256, 512 channels).
+    * CNN branch: ResNet; Stage 0 = MaxPool(ReLU(BN(Conv7x7, stride 2, padding 4))) with
+      a 3x3 / stride 2 / padding 1 max-pool (Eq. 1; 32x32 -> 9x9), and Stages 1-4 with two
+      BasicBlocks each (64, 128, 256, 512 channels; 9 -> 9 -> 5 -> 3 -> 2).
     * Transformer branch: ViT with patch size 32 -> one token per band (+ class token),
       hidden dim 256, three encoder blocks per stage.
     * CIT module after Stages 1-3:
@@ -99,8 +100,9 @@ class CITEmotionNet(nn.Module):
         super().__init__()
         self.channel_names = list(channel_names or COMMON_CHANNELS)[:n_channels]
         self.map_size = map_size
-        self.stage0_cnn = nn.Sequential(
-            nn.Conv2d(n_bands, widths[0], 7, 1, 3, bias=False), nn.BatchNorm2d(widths[0]), nn.ReLU(inplace=True),
+        self.stage0_cnn = nn.Sequential(                                   # Eq. 1
+            nn.Conv2d(n_bands, widths[0], 7, 2, 4, bias=False), nn.BatchNorm2d(widths[0]), nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, 2, 1),
         )
         self.cnn_stages = nn.ModuleList()
         cin = widths[0]

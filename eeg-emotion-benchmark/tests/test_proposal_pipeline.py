@@ -169,10 +169,27 @@ class SplitAndLeakageTests(unittest.TestCase):
         train, _, _, _ = build_fold_loaders(str(self.src), self.paths["loso"], 0, feature="raw")
         ds = train.dataset
         sampler = clisa.StimulusPairSampler(ds.subject_ids, ds.trial_ids, ds.window_ids, seed=0)
-        a, b = sampler.sample(8)
-        for i, j in zip(a, b):
-            self.assertNotEqual(ds.subject_ids[i], ds.subject_ids[j])
-            self.assertEqual((ds.trial_ids[i], ds.window_ids[i]), (ds.trial_ids[j], ds.window_ids[j]))
+        batches = list(sampler.epoch())
+        n_subjects = len(set(ds.subject_ids))
+        self.assertEqual(len(batches), n_subjects * (n_subjects - 1) // 2)   # every pair once
+        for a, b in batches:
+            self.assertEqual(len({ds.subject_ids[i] for i in a}), 1)
+            self.assertEqual(len({ds.subject_ids[j] for j in b}), 1)
+            self.assertNotEqual(ds.subject_ids[a[0]], ds.subject_ids[b[0]])
+            trials = [ds.trial_ids[i] for i in a]
+            self.assertEqual(len(trials), len(set(trials)))                  # one sample per trial
+            for i, j in zip(a, b):
+                self.assertEqual((ds.trial_ids[i], ds.window_ids[i]), (ds.trial_ids[j], ds.window_ids[j]))
+
+    def test_stgate_dynamic_adjacency_is_sparse_and_trainable(self):
+        model = stgate.build({})
+        x = torch.randn(6, 14, 4, 4)
+        model(x).sum().backward()
+        self.assertGreater(model.spatial.w2.grad.abs().sum().item(), 0)
+        self.assertGreater(model.temporal.u3.grad.abs().sum().item(), 0)
+        with torch.no_grad():
+            kept = model.eval().adjacency(x).ne(0).sum(-1)
+        self.assertTrue(torch.all(kept == 10))
 
     def test_all_proposal_models_train_one_epoch(self):
         recipe = TrainRecipe(max_epochs=1, patience=1, min_epochs=1, batch_size=16)
