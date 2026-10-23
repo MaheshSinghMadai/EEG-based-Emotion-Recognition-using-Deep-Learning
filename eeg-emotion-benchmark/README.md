@@ -13,7 +13,7 @@ harmonized preprocessing pipeline, frozen hash-stamped splits and automated leak
 eeg-emotion-benchmark/
 ├── data/
 │   ├── raw/DEAP/sXX.dat, raw/DREAMER.mat
-│   ├── processed/{DEAP,DREAMER}/      # per-subject .npz (harmonized-v2)
+│   ├── processed/{DEAP,DREAMER}/      # per-subject .npz (harmonized-v2) + preprocess_config.json
 │   └── splits/{DEAP,DREAMER}/         # frozen manifests: loso, subject_kfold, trial_kfold,
 │                                      #   random_window, transfer_source
 ├── docs/
@@ -28,20 +28,25 @@ eeg-emotion-benchmark/
 │   ├── benchmark_proposal.py          # runs protocols, writes results/proposal/**
 │   ├── analysis.py                    # thesis tables T1–T5 + leakage figure
 │   ├── visualize_proposal.py          # comparison plots
-│   └── models/proposal/               # the five paper-faithful models
-├── tests/test_proposal_pipeline.py
-└── results/proposal/                  # result JSONs, predictions, comparisons, analysis
+│   ├── evaluation.py                  # seeding, device selection, metrics
+│   └── models/
+│       ├── _common.py                 # shared build(cfg) factory
+│       └── proposal/                  # the five paper-faithful models
+└── results/proposal/
+    ├── {DEAP,DREAMER}/<protocol>/     # <Model>_<label>.json, comparison_<label>.{csv,md}, predictions/
+    ├── {DEAP_to_DREAMER,DREAMER_to_DEAP}/  # transfer runs, same layout
+    ├── analysis/<label>/              # tables.md, leakage_inflation.{csv,png}, transfer_gap.csv
+    └── visualizations/<label>/        # heatmaps, rankings, accuracy vs macro-F1, transfer direction
 ```
 
 ## Quick start
 
 ```bash
 uv venv --python 3.14 .venv && source .venv/bin/activate
-uv pip install -r requirements.txt                # requirements-extras.txt: notebooks
+uv pip install -r requirements.txt                # requirements-extras.txt: mat73 for v7.3 .mat files
 
 python -m src.preprocessing --dataset DEAP        # also writes data/splits/DEAP/*.json
 python -m src.preprocessing --dataset DREAMER
-python -m unittest tests.test_proposal_pipeline
 
 # smoke test: one fold, two epochs
 python -m src.benchmark_proposal --protocol loso --dataset DEAP --max-folds 1 --max-epochs 2
@@ -52,7 +57,12 @@ python -m src.benchmark_proposal --protocol leakage_suite --dataset DREAMER --se
 python -m src.benchmark_proposal --protocol transfer --source DEAP --target DREAMER --seeds 42 43 44
 
 python -m src.analysis --label valence             # results/proposal/analysis/valence/tables.md
+python -m src.visualize_proposal --label valence   # results/proposal/visualizations/valence/*.png
 ```
+
+`benchmark_proposal` options: `--models` (subset of DADPc, CIT-EmotionNet, STGATE, DAH-Net, CLISA),
+`--label` (valence, arousal, dominance), `--patience`, `--max-folds` / `--max-epochs` (smoke tests).
+`leakage_suite` runs `subject_kfold`, `trial_kfold` and `random_window` back to back.
 
 ## Protocol guarantees
 
