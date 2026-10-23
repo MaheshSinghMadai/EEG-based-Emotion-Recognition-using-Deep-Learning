@@ -1,9 +1,6 @@
 # Optional extras, not needed for the thesis benchmark. Not pinned: not part of the tested setup.
 -r requirements.txt
 
-# Legacy DREAMER-only model zoo (src/benchmark_si.py)
-pandas>=2.0
-
 # Only for MATLAB v7.3 (HDF5) files; the public DREAMER.mat is v5 and loads with scipy
 mat73>=0.62
 

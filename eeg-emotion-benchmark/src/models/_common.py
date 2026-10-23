@@ -1,11 +1,11 @@
 """
 _common.py
 ==========
-Shared plumbing for the model zoo so every `src/models/<algo>.py` file exposes an
+Shared plumbing so every `src/models/proposal/<algo>.py` file exposes an
 identical `build(cfg)` factory without copy-pasting the same 10 lines.
 
-`build(cfg)` is the single "pass parameters -> get a ready model" surface used by
-`evaluation.run_loso` / `benchmark_si.run_one` (`build_model({..., "meta": meta})`).
+`build(cfg)` is the single "pass parameters -> get a ready model" surface
+(`build_model({..., "meta": meta})`).
 `cfg` carries:
     * `cfg["meta"]["input_shape"]` : the loader-derived input dims for this fold
     * `cfg["n_classes"]`           : number of target classes (default 2)

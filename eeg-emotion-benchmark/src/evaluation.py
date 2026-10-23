@@ -5,8 +5,7 @@ Shared evaluation harness. EVERY benchmark notebook must go through this module 
 the numbers in the thesis results table are produced identically.
 
 The benchmark uses a single validation protocol: leave-one-subject-out
-(subject-independent). `benchmark_si.run_one` is the one entry point the notebooks
-call; it drives `run_loso` below.
+(subject-independent), driven by `run_loso` below.
 
 What it provides
 ----------------

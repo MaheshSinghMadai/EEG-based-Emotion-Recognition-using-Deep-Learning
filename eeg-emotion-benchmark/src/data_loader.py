@@ -46,10 +46,6 @@ FEATURE_KEYS = {
     "handcrafted": "handcrafted",
 }
 
-# 5-electrode consumer-grade subset used by the legacy reduced-electrode model.
-REDUCED_5_CHANNELS = ["AF3", "F3", "F4", "AF4", "O1"]
-
-
 # --------------------------------------------------------------------------------------
 # Raw npz access
 # --------------------------------------------------------------------------------------

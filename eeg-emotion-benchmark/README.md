@@ -33,14 +33,11 @@ eeg-emotion-benchmark/
 └── results/proposal/                  # result JSONs, predictions, comparisons, analysis
 ```
 
-`src/benchmark_si.py` and the other modules in `src/models/` are the earlier DREAMER-only model
-zoo from before the proposal. They are not part of the thesis benchmark.
-
 ## Quick start
 
 ```bash
 uv venv --python 3.14 .venv && source .venv/bin/activate
-uv pip install -r requirements.txt                # requirements-extras.txt: notebooks / legacy zoo
+uv pip install -r requirements.txt                # requirements-extras.txt: notebooks
 
 python -m src.preprocessing --dataset DEAP        # also writes data/splits/DEAP/*.json
 python -m src.preprocessing --dataset DREAMER
