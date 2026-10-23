@@ -39,8 +39,8 @@ zoo from before the proposal. They are not part of the thesis benchmark.
 ## Quick start
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+uv venv --python 3.14 .venv && source .venv/bin/activate
+uv pip install -r requirements.txt                # requirements-extras.txt: notebooks / legacy zoo
 
 python -m src.preprocessing --dataset DEAP        # also writes data/splits/DEAP/*.json
 python -m src.preprocessing --dataset DREAMER
